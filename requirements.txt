@@ -1,0 +1,9 @@
+streamlit
+pandas
+plotly
+requests
+textblob
+transformers
+torch
+tf-keras
+nest_asyncio
