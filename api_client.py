@@ -1,16 +1,17 @@
 import requests
 import time
+from datetime import datetime
 from typing import Dict, Any, Generator
 
 # --- CONFIGURATION (Free Tier) ---
-API_KEY = "new1_81efcd1da3a14aa5919e3082b164b068" 
+API_KEY = "new1_c4a4317b0a7f4669b7a0baf181eb4861" 
 API_URL = "https://api.twitterapi.io/twitter/tweet/advanced_search"
 
 class TwitterAPIClient:
     """
-    Client API Optimisé pour la Vitesse et le Volume.
-    Récupère les données en continu (Pagination Smart) sans fragmentation temporelle
-    pour éviter les délais inutiles sur les jours vides.
+    Client API Optimisé V3 (Strict Mode).
+    1. Force le respect des dates (Filtrage Client-Side).
+    2. Retry Mechanism : Ne s'arrête pas au premier échec vide.
     """
     
     def build_query(self, p: Dict[str, Any]) -> str:
@@ -47,26 +48,33 @@ class TwitterAPIClient:
         if p.get('replies_filter') == "Exclure les réponses": parts.append("exclude:replies")
         elif p.get('replies_filter') == "Uniquement les réponses": parts.append("filter:replies")
 
-        # 5. Dates (Global Range)
+        # 5. Dates (Pour l'API)
         if p.get('since'): parts.append(f"since:{p['since']}")
         if p.get('until'): parts.append(f"until:{p['until']}")
 
         return " ".join(parts)
 
     def fetch_tweets_generator(self, params: Dict[str, Any], limit: int = 50) -> Generator[Dict, None, None]:
-        """
-        Générateur Rapide (Global Search).
-        """
+        
         query_string = self.build_query(params)
         headers = {"X-API-Key": API_KEY}
         
         all_tweets = []
         next_cursor = None
         start_time = time.time()
+        empty_retries = 0  # Compteur pour les essais si page vide
         
-        print(f"[SYSTEM] Mode Rapide activé. Cible : {limit}")
+        # Conversion des dates pour le filtrage strict (Client-Side)
+        try:
+            strict_start = datetime.strptime(params['since'], "%Y-%m-%d")
+            strict_end = datetime.strptime(params['until'], "%Y-%m-%d")
+            print(f"[SYSTEM] Filtrage strict activé : {strict_start.date()} -> {strict_end.date()}")
+        except:
+            strict_start = None
+            print("[SYSTEM] Pas de filtrage date strict (Format invalide)")
 
-        # Boucle continue jusqu'à atteindre la limite
+        print(f"[SYSTEM] Démarrage... Cible : {limit}")
+
         while len(all_tweets) < limit:
             
             payload = {"query": query_string, "limit": 20}
@@ -76,8 +84,9 @@ class TwitterAPIClient:
             try:
                 response = requests.get(API_URL, params=payload, headers=headers)
                 
-                # Gestion Rate Limit (Pause et reprise automatique)
+                # Gestion Rate Limit
                 if response.status_code == 429:
+                    print("[API] Pause forcée (Rate Limit)...")
                     time.sleep(10)
                     continue 
 
@@ -88,22 +97,46 @@ class TwitterAPIClient:
                 data = response.json()
                 batch = data.get('tweets', [])
                 
-                # Si pas de tweets, on vérifie si c'est vraiment la fin
+                # --- LOGIQUE DE RETRY (POUR NE PAS S'ARRÊTER TROP TÔT) ---
                 if not batch:
-                    # Parfois l'API renvoie une page vide mais il y a une suite
-                    if not data.get('has_next_page'):
-                        break
-                    else:
-                        # On essaie de forcer la page suivante
+                    empty_retries += 1
+                    print(f"[API] Page vide reçue. Tentative {empty_retries}/3...")
+                    if empty_retries >= 3:
+                        print("[API] Arrêt : Trop de pages vides consécutives.")
+                        break # Vraiment fini
+                    
+                    # On essaie de forcer le curseur suivant même si vide
+                    if data.get('has_next_page') and data.get('next_cursor'):
                         next_cursor = data.get('next_cursor')
                         time.sleep(2)
                         continue
+                    else:
+                        break
+                else:
+                    empty_retries = 0 # Reset du compteur si on trouve des tweets
 
-                # Ajout des tweets
+                # --- TRAITEMENT ET FILTRAGE STRICT ---
+                added_in_batch = 0
                 for t in batch:
-                    if len(all_tweets) >= limit: break # Arrêt précis
+                    if len(all_tweets) >= limit: break
                     
+                    # Déduplication ID
                     if any(existing['id'] == t.get('id') for existing in all_tweets): continue
+
+                    # --- FILTRE DATE STRICT ---
+                    if strict_start:
+                        try:
+                            # Format Twitter: "2023-05-24T12:00:00.000Z"
+                            # On prend juste la partie date YYYY-MM-DD
+                            t_date_str = t.get('createdAt', '').split('T')[0]
+                            t_date = datetime.strptime(t_date_str, "%Y-%m-%d")
+                            
+                            # Si le tweet est HORS de la plage, on l'ignore
+                            if t_date < strict_start or t_date > strict_end:
+                                continue
+                        except:
+                            pass # Si erreur de parsing, on garde par sécurité
+                    # --------------------------
                     
                     author = t.get('author') or {}
                     tweet_obj = {
@@ -119,6 +152,9 @@ class TwitterAPIClient:
                         }
                     }
                     all_tweets.append(tweet_obj)
+                    added_in_batch += 1
+
+                print(f"[API] +{added_in_batch} tweets valides (Total: {len(all_tweets)})")
 
                 # Mise à jour UI
                 duration = time.time() - start_time
@@ -130,22 +166,21 @@ class TwitterAPIClient:
                     "finished": False
                 }
 
-                # Pagination
                 next_cursor = data.get('next_cursor')
                 if not next_cursor or not data.get('has_next_page'):
+                    print("[API] Plus de pages disponibles.")
                     break
                 
                 if len(all_tweets) >= limit:
                     break
 
-                # Pause optimisée (5s est le strict minimum pour éviter le blocage)
-                time.sleep(5) 
+                # Pause Optimisée
+                time.sleep(4) 
 
             except Exception as e:
                 yield {"error": str(e)}
                 break
 
-        # Envoi Final
         duration = time.time() - start_time
         yield {
             "current_count": len(all_tweets),
