@@ -76,7 +76,7 @@ with st.sidebar:
         st.subheader("6. Volume & Limites")
         limit = st.number_input("Limite (Max 10k)", 10, 10000, 100, step=100)
         
-        submitted = st.form_submit_button("🚀 Lancer l'Analyse Complète")
+        submitted = st.form_submit_button("Lancer l'Analyse Complète")
 
     if submitted:
         client = TwitterAPIClient()
@@ -192,7 +192,7 @@ if not df_raw.empty:
 
     st.divider()
     
-    st.subheader("📉 Solde Net (Périodicité : 4 Heures)")
+    st.subheader("Solde Net (Périodicité : 4 Heures)")
     st.caption("Solde = [Volume Positif] - [Volume Négatif]")
     
     if 'date' in df.columns and not df.empty:
@@ -212,8 +212,9 @@ if not df_raw.empty:
         else:
             st.info("Données insuffisantes pour le solde polarisé.")
 
-    st.subheader("📋 Registre des Données")
+    st.subheader("Registre des Données")
     st.dataframe(df[['date', 'handle', 'text', 'engagement', 'sentiment_cat']], use_container_width=True)
 
 else:
     st.info("Utilisez le menu latéral pour configurer la recherche.")
+
