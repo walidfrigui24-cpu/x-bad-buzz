@@ -31,13 +31,13 @@ st.markdown("""
 COLOR_MAP = {'Positif': '#00CC96', 'Négatif': '#EF553B', 'Neutre': '#7f7f7f'}
 
 # --- 1. CONFIGURATION CLOUD AI (HUGGING FACE) ---
-# Récupération sécurisée de la clé depuis st.secrets
 try:
     HF_API_KEY = st.secrets["HF_API_KEY"]
 except:
     HF_API_KEY = None 
 
-API_URL_SENTIMENT = "https://api-inference.huggingface.co/models/cardiffnlp/twitter-xlm-roberta-base-sentiment"
+# --- التحديث الجديد: استخدام النطاق router بدلاً من api-inference ---
+API_URL_SENTIMENT = "https://router.huggingface.co/models/cardiffnlp/twitter-xlm-roberta-base-sentiment"
 
 def query_huggingface_api(payload):
     """Envoi avec gestion d'erreur explicite"""
@@ -137,7 +137,7 @@ def load_and_process_data():
         if col not in df.columns: df[col] = 0
     df['engagement'] = df['metrics.likes'] + df['metrics.retweets']
 
-    # --- NOUVELLE FONCTION AVEC PATIENCE ---
+    # --- FONCTION D'ANALYSE (PATIENCE + NOUVEAU ROUTER) ---
     def get_cloud_sentiment(text_list):
         results = []
         progress_bar = st.progress(0)
@@ -153,7 +153,7 @@ def load_and_process_data():
             payload = {"inputs": text[:512]}
             sentiment_found = False
             
-            # On essaie jusqu'à 10 fois (pour laisser le temps au modèle de charger)
+            # On essaie jusqu'à 10 fois
             for attempt in range(10):
                 api_response = query_huggingface_api(payload)
                 
