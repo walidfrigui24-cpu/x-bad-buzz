@@ -36,17 +36,24 @@ try:
 except:
     HF_API_KEY = None 
 
-# --- التحديث الجديد: استخدام النطاق router بدلاً من api-inference ---
-API_URL_SENTIMENT = "https://router.huggingface.co/models/cardiffnlp/twitter-xlm-roberta-base-sentiment"
+# --- تصحيح الرابط: إضافة /hf-inference/ للمسار الجديد ---
+API_URL_SENTIMENT = "https://router.huggingface.co/hf-inference/models/cardiffnlp/twitter-xlm-roberta-base-sentiment"
 
 def query_huggingface_api(payload):
-    """Envoi avec gestion d'erreur explicite"""
-    if not HF_API_KEY: return {"error": "Mising Key"}
+    """Envoi avec gestion d'erreur ROBUSTE (JSON & TEXT)"""
+    if not HF_API_KEY: return {"error": "Clé manquante (Missing Key)"}
     
     headers = {"Authorization": f"Bearer {HF_API_KEY}"}
     try:
         response = requests.post(API_URL_SENTIMENT, headers=headers, json=payload)
-        return response.json()
+        
+        # محاولة قراءة JSON
+        try:
+            return response.json()
+        except json.JSONDecodeError:
+            # إذا فشل الـ JSON، نعيد النص الخام لمعرفة سبب المشكلة (غالباً HTML error)
+            return {"error": f"Server Error ({response.status_code}): {response.text[:200]}"}
+            
     except Exception as e:
         return {"error": str(e)}
 
@@ -137,7 +144,7 @@ def load_and_process_data():
         if col not in df.columns: df[col] = 0
     df['engagement'] = df['metrics.likes'] + df['metrics.retweets']
 
-    # --- FONCTION D'ANALYSE (PATIENCE + NOUVEAU ROUTER) ---
+    # --- FONCTION D'ANALYSE (PATIENCE + DEBUG) ---
     def get_cloud_sentiment(text_list):
         results = []
         progress_bar = st.progress(0)
@@ -160,13 +167,17 @@ def load_and_process_data():
                 # Cas d'erreur ou chargement
                 if isinstance(api_response, dict) and "error" in api_response:
                     err_msg = api_response["error"]
+                    
+                    # 1. Modèle en chargement
                     if "loading" in err_msg.lower():
                         status_text.warning(f"⏳ Le modèle IA démarre... ({attempt+1}/10)")
                         time.sleep(5) 
                         continue
+                    
+                    # 2. Erreur fatale (imprimée pour debugging)
                     elif not error_shown:
-                        st.error(f"🛑 Erreur API Hugging Face : {err_msg}")
-                        error_shown = True
+                        st.error(f"🛑 Erreur Hugging Face : {err_msg}")
+                        error_shown = True # On ne montre l'erreur qu'une fois pour ne pas spammer
                         break
                 
                 # Cas de succès
