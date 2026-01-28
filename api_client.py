@@ -1,22 +1,30 @@
 import requests
 import time
 import math
+import streamlit as st
 from datetime import datetime, timedelta
 from typing import Dict, Any, Generator
 
-# --- CONFIGURATION ---
-API_KEY = "new1_e1b45ea37988449dbebfea70c1740126" 
+# --- AUTHENTIFICATION SÉCURISÉE ---
+# Le client cherche la clé dans les secrets Streamlit.
+try:
+    API_KEY = st.secrets["TWITTER_API_KEY"]
+except:
+    API_KEY = None # Sera géré plus tard par une erreur explicite
+
 API_URL = "https://api.twitterapi.io/twitter/tweet/advanced_search"
 
 class TwitterAPIClient:
     """
-    Client API V5 (Time-Distributed).
-    Divise l'objectif total par le nombre de jours pour forcer
-    une extraction équitable sur toute la période sélectionnée.
+    Client API V6 (Final Production).
+    Intègre :
+    1. Time Slicing : Répartition équitable des tweets sur la période.
+    2. Gestion des erreurs : Rate limits (429) et quotas (402).
+    3. Sécurité : Utilisation des variables d'environnement.
     """
     
     def build_base_query(self, p: Dict[str, Any]) -> str:
-        """Construit la requête SANS les dates (elles seront ajoutées dans la boucle)."""
+        """Construction de la syntaxe de requête complexe."""
         parts = []
         
         # 1. Sémantique
@@ -39,7 +47,7 @@ class TwitterAPIClient:
         if p.get('to_accounts'): parts.append(f"to:{p['to_accounts'].replace('@', '')}")
         if p.get('mention_accounts'): parts.append(f"@{p['mention_accounts'].replace('@', '')}")
 
-        # 3. Filtres
+        # 3. Métriques & Filtres
         if p.get('min_faves') and int(p['min_faves']) > 0: parts.append(f"min_faves:{p['min_faves']}")
         if p.get('min_retweets') and int(p['min_retweets']) > 0: parts.append(f"min_retweets:{p['min_retweets']}")
         if p.get('min_replies') and int(p['min_replies']) > 0: parts.append(f"min_replies:{p['min_replies']}")
@@ -53,13 +61,17 @@ class TwitterAPIClient:
 
     def fetch_tweets_generator(self, params: Dict[str, Any], total_limit: int = 50) -> Generator[Dict, None, None]:
         
+        if not API_KEY:
+            yield {"error": "Clé API Twitter manquante dans les Secrets !"}
+            return
+
         base_query = self.build_base_query(params)
         headers = {"X-API-Key": API_KEY}
         
         all_tweets = []
         start_time_global = time.time()
         
-        # 1. Calcul de la durée (Nombre de jours)
+        # 1. Calcul de la durée (Time Distribution Logic)
         try:
             d_start = datetime.strptime(params['since'], "%Y-%m-%d")
             d_end = datetime.strptime(params['until'], "%Y-%m-%d")
@@ -70,38 +82,32 @@ class TwitterAPIClient:
         delta = (d_end - d_start).days
         if delta <= 0: delta = 1
         
-        # 2. Calcul du Quota par jour (Ex: 100 tweets / 5 jours = 20 tweets/jour)
+        # 2. Calcul du Quota Journalier (Total / Jours)
         daily_quota = math.ceil(total_limit / delta)
-        # Sécurité: on ne fait pas de requête pour moins de 10 tweets (perte de temps)
+        # Minimum technique pour éviter les appels inutiles
         if daily_quota < 10: daily_quota = 10
         
-        print(f"[SYSTEM] Période: {delta} jours. Quota journalier: {daily_quota} tweets.")
+        print(f"[SYSTEM] Stratégie temporelle : {delta} jours | {daily_quota} tweets/jour")
 
-        # --- BOUCLE JOUR PAR JOUR ---
-        # On itère du plus récent au plus ancien (ou l'inverse, ici du début à la fin)
+        # --- BOUCLE PRINCIPALE (JOUR PAR JOUR) ---
         current_day = d_start
         
         while current_day < d_end:
-            # Si on a déjà dépassé la limite TOTALE (pas journalière), on arrête tout
+            # Arrêt global si objectif atteint
             if len(all_tweets) >= total_limit:
                 break
 
             day_str = current_day.strftime("%Y-%m-%d")
-            # Le jour suivant pour la borne 'until'
             next_day = current_day + timedelta(days=1)
             next_day_str = next_day.strftime("%Y-%m-%d")
             
-            # Requête spécifique pour CE jour
-            # since:JOUR until:LENDEMAIN
+            # Requête partitionnée
             daily_query = f"{base_query} since:{day_str} until:{next_day_str}"
-            
-            print(f"[API] Scanning {day_str} -> {next_day_str} (Cible: {daily_quota})")
             
             day_tweets = []
             next_cursor = None
-            empty_retries = 0
-
-            # Boucle pour remplir le quota DU JOUR
+            
+            # Boucle interne (Pagination du jour)
             while len(day_tweets) < daily_quota:
                 
                 payload = {"query": daily_query, "limit": 20}
@@ -110,21 +116,25 @@ class TwitterAPIClient:
                 try:
                     response = requests.get(API_URL, params=payload, headers=headers)
                     
+                    # Gestion Rate Limit (429)
                     if response.status_code == 429:
                         time.sleep(10)
                         continue 
+                    
+                    # Gestion Quota Épuisé (402)
+                    if response.status_code == 402:
+                        yield {"error": "Crédit API épuisé (Erreur 402). Veuillez changer la clé."}
+                        return
 
                     if response.status_code != 200:
-                        yield {"error": f"Err {day_str}: {response.status_code}"}
+                        yield {"error": f"Erreur API ({response.status_code})"}
                         break
 
                     data = response.json()
                     batch = data.get('tweets', [])
 
                     if not batch:
-                        # Si page vide, on passe DIRECTEMENT au jour suivant (Gain de temps)
-                        # Pas besoin de retry 3 fois si on partitionne par jour
-                        print(f"[API] Fin des données pour {day_str}.")
+                        # Jour vide ou fini, on passe au suivant
                         break
 
                     for t in batch:
@@ -146,7 +156,7 @@ class TwitterAPIClient:
                         all_tweets.append(tweet_obj)
                         day_tweets.append(tweet_obj)
 
-                    # Update UI
+                    # Mise à jour UI en temps réel
                     duration = time.time() - start_time_global
                     yield {
                         "current_count": len(all_tweets),
@@ -161,19 +171,16 @@ class TwitterAPIClient:
                         break
                     
                     if len(day_tweets) >= daily_quota:
-                        break # Quota du jour atteint, on passe au lendemain
+                        break 
 
-                    time.sleep(2) # Petite pause intra-jour
+                    time.sleep(1) # Pause légère
 
                 except Exception as e:
-                    print(f"Erreur: {e}")
+                    yield {"error": str(e)}
                     break
             
-            # Passage au jour suivant
             current_day += timedelta(days=1)
-            
-            # Pause entre les jours pour éviter le Rate Limit
-            time.sleep(3)
+            time.sleep(2) # Pause inter-jours pour sécurité
 
         # Envoi Final
         duration = time.time() - start_time_global
@@ -184,4 +191,3 @@ class TwitterAPIClient:
             "duration": round(duration, 2),
             "finished": True
         }
-
