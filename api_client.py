@@ -1,22 +1,24 @@
 import requests
 import time
-import math
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Dict, Any, Generator
 
 # --- CONFIGURATION (Free Tier) ---
+# مفتاح API (يمكن تغييره لاحقاً ليأتي من Streamlit Secrets)
 API_KEY = "new1_c4a4317b0a7f4669b7a0baf181eb4861" 
 API_URL = "https://api.twitterapi.io/twitter/tweet/advanced_search"
 
 class TwitterAPIClient:
     """
-    Client API Intelligent avec 'Time Slicing'.
-    Divise la requête globale en sous-requêtes journalières pour garantir
-    une répartition équitable des tweets sur toute la période.
+    Client API V4 (Final Logic).
+    Features:
+    1. Strict Date Filtering: Rejet immédiat des tweets hors période.
+    2. Retry Mechanism: Survie aux pages vides (jusqu'à 3 tentatives).
+    3. Pagination Robuste: Navigation forcée via curseurs.
     """
     
     def build_query(self, p: Dict[str, Any]) -> str:
-        """Construit la chaîne de requête (SANS les dates, gérées par la boucle)."""
+        """Construction de la requête booléenne."""
         parts = []
         
         # 1. Sémantique
@@ -39,154 +41,154 @@ class TwitterAPIClient:
         if p.get('to_accounts'): parts.append(f"to:{p['to_accounts'].replace('@', '')}")
         if p.get('mention_accounts'): parts.append(f"@{p['mention_accounts'].replace('@', '')}")
 
-        # 3. Engagement
+        # 3. Engagement & Filtres
         if p.get('min_faves') and int(p['min_faves']) > 0: parts.append(f"min_faves:{p['min_faves']}")
         if p.get('min_retweets') and int(p['min_retweets']) > 0: parts.append(f"min_retweets:{p['min_retweets']}")
         if p.get('min_replies') and int(p['min_replies']) > 0: parts.append(f"min_replies:{p['min_replies']}")
 
-        # 4. Filtres
         if p.get('links_filter') == "Exclure les liens": parts.append("-filter:links")
         elif p.get('links_filter') == "Uniquement avec liens": parts.append("filter:links")
-            
         if p.get('replies_filter') == "Exclure les réponses": parts.append("exclude:replies")
         elif p.get('replies_filter') == "Uniquement les réponses": parts.append("filter:replies")
 
+        # 4. Dates (Indispensable pour l'API)
+        if p.get('since'): parts.append(f"since:{p['since']}")
+        if p.get('until'): parts.append(f"until:{p['until']}")
+
         return " ".join(parts)
 
-    def fetch_tweets_generator(self, params: Dict[str, Any], total_limit: int = 50) -> Generator[Dict, None, None]:
-        """
-        Générateur intelligent qui itère jour par jour.
-        """
-        base_query = self.build_query(params)
+    def fetch_tweets_generator(self, params: Dict[str, Any], limit: int = 50) -> Generator[Dict, None, None]:
+        
+        query_string = self.build_query(params)
         headers = {"X-API-Key": API_KEY}
+        
         all_tweets = []
+        next_cursor = None
         start_time = time.time()
-
-        # 1. Calcul de la plage de dates
+        empty_retries = 0  # Compteur de sécurité pour les pages vides
+        
+        # --- LOGIQUE DE DATE STRICTE (CLIENT-SIDE) ---
+        # L'API est parfois approximative, nous filtrons nous-mêmes pour garantir 100% de précision.
         try:
-            d_start = datetime.strptime(params['since'], "%Y-%m-%d")
-            d_end = datetime.strptime(params['until'], "%Y-%m-%d")
+            strict_start = datetime.strptime(params['since'], "%Y-%m-%d")
+            strict_end = datetime.strptime(params['until'], "%Y-%m-%d")
+            # On ajoute un jour à la fin pour inclure la journée entière (23:59:59)
+            print(f"[SYSTEM] Filtrage strict activé : {strict_start.date()} -> {strict_end.date()}")
         except:
-            # Fallback si erreur de date : mode classique
-            d_start = datetime.now() - timedelta(days=7)
-            d_end = datetime.now()
-        
-        # Nombre de jours total
-        delta_days = (d_end - d_start).days
-        if delta_days <= 0: delta_days = 1
-        
-        # 2. Calcul du Quota par jour (Répartition équitable)
-        # Ex: 100 tweets sur 10 jours = 10 tweets/jour
-        # On utilise ceil pour s'assurer d'atteindre le but même avec des arrondis
-        daily_quota = math.ceil(total_limit / delta_days)
-        
-        # Sécurité : Minimum 10 tweets par jour pour rentabiliser la requête API
-        if daily_quota < 10: daily_quota = 10
+            strict_start = None
+            print("[SYSTEM] Attention : Filtrage strict désactivé (Format de date invalide)")
 
-        print(f"[SYSTEM] Stratégie : {delta_days} jours, {daily_quota} tweets/jour")
+        print(f"[SYSTEM] Démarrage extraction... Cible : {limit}")
 
-        # --- BOUCLE TEMPORELLE (JOUR APRÈS JOUR) ---
-        current_day = d_start
-        
-        while current_day < d_end:
-            # Si on a déjà atteint l'objectif global, on arrête tout
-            if len(all_tweets) >= total_limit:
-                break
-
-            # Définition de la fenêtre de 24h
-            day_str = current_day.strftime("%Y-%m-%d")
-            next_day_str = (current_day + timedelta(days=1)).strftime("%Y-%m-%d")
+        while len(all_tweets) < limit:
             
-            # Ajout des dates à la requête
-            # Note: Twitter API utilise 'until' comme exclusif, donc c'est parfait
-            full_query = f"{base_query} since:{day_str} until:{next_day_str}"
-            
-            print(f"[API] Traitement du jour : {day_str}")
+            payload = {"query": query_string, "limit": 20}
+            if next_cursor:
+                payload["cursor"] = next_cursor
 
-            # --- BOUCLE PAGINATION (POUR CE JOUR PRÉCIS) ---
-            day_tweets = []
-            next_cursor = None
-            
-            while len(day_tweets) < daily_quota:
+            try:
+                response = requests.get(API_URL, params=payload, headers=headers)
                 
-                payload = {
-                    "query": full_query,
-                    "limit": 20, # Toujours 20 par page technique
-                }
-                if next_cursor:
-                    payload["cursor"] = next_cursor
+                # Gestion Rate Limit (Pause forcée)
+                if response.status_code == 429:
+                    print("[API] 🛑 Rate Limit atteint. Pause de 10s...")
+                    time.sleep(10)
+                    continue 
 
-                try:
-                    response = requests.get(API_URL, params=payload, headers=headers)
-                    
-                    if response.status_code == 429:
-                        time.sleep(10)
-                        continue 
-
-                    if response.status_code != 200:
-                        yield {"error": f"Erreur jour {day_str}: {response.status_code}"}
-                        break
-
-                    data = response.json()
-                    batch = data.get('tweets', [])
-                    
-                    if not batch:
-                        break # Pas de tweets ce jour-là, on passe
-
-                    for t in batch:
-                        # Déduplication globale
-                        if any(existing['id'] == t.get('id') for existing in all_tweets): continue
-                        
-                        author = t.get('author') or {}
-                        tweet_obj = {
-                            "id": t.get('id'),
-                            "date_iso": t.get('createdAt'),
-                            "text": t.get('text', ""),
-                            "handle": author.get('userName', 'Inconnu'),
-                            "url": t.get('url') or t.get('twitterUrl', ""),
-                            "metrics": {
-                                "likes": t.get('likeCount', 0),
-                                "retweets": t.get('retweetCount', 0),
-                                "replies": t.get('replyCount', 0)
-                            }
-                        }
-                        all_tweets.append(tweet_obj)
-                        day_tweets.append(tweet_obj)
-
-                    # Mise à jour de l'interface à chaque lot
-                    duration = time.time() - start_time
-                    yield {
-                        "current_count": len(all_tweets),
-                        "target": total_limit,
-                        "data": all_tweets,
-                        "duration": round(duration, 2),
-                        "finished": False
-                    }
-
-                    next_cursor = data.get('next_cursor')
-                    if not next_cursor or not data.get('has_next_page'):
-                        break
-                    
-                    # Pause légère entre les pages d'un même jour
-                    time.sleep(2) 
-
-                except Exception as e:
-                    yield {"error": str(e)}
+                if response.status_code != 200:
+                    yield {"error": f"Erreur API ({response.status_code})"}
                     break
-            
-            # --- FIN DE LA JOURNÉE ---
-            current_day += timedelta(days=1)
-            
-            # Pause de sécurité entre les jours (Rate Limit Free Tier)
-            # Important : On attend 5s avant de passer au jour suivant
-            time.sleep(5)
+
+                data = response.json()
+                batch = data.get('tweets', [])
+                
+                # --- LOGIQUE ANTI-ARRÊT PRÉMATURÉ ---
+                if not batch:
+                    empty_retries += 1
+                    print(f"[API] ⚠️ Page vide ({empty_retries}/3). Tentative de forcing...")
+                    
+                    if empty_retries >= 3:
+                        print("[API] Arrêt définitif : Trop de pages vides.")
+                        break
+                    
+                    # On tente de forcer le curseur suivant même sans résultats
+                    if data.get('has_next_page') and data.get('next_cursor'):
+                        next_cursor = data.get('next_cursor')
+                        time.sleep(2)
+                        continue
+                    else:
+                        break
+                else:
+                    empty_retries = 0 # Reset si on trouve des données
+
+                # --- TRAITEMENT ET FILTRAGE ---
+                added_in_batch = 0
+                for t in batch:
+                    if len(all_tweets) >= limit: break
+                    
+                    if any(existing['id'] == t.get('id') for existing in all_tweets): continue
+
+                    # 1. Vérification Date Stricte
+                    if strict_start:
+                        try:
+                            t_date_str = t.get('createdAt', '').split('T')[0]
+                            t_date = datetime.strptime(t_date_str, "%Y-%m-%d")
+                            # Rejet silencieux si hors date
+                            if t_date < strict_start or t_date > strict_end:
+                                continue
+                        except: pass 
+                    
+                    # 2. Construction Objet
+                    author = t.get('author') or {}
+                    tweet_obj = {
+                        "id": t.get('id'),
+                        "date_iso": t.get('createdAt'),
+                        "text": t.get('text', ""),
+                        "handle": author.get('userName', 'Inconnu'),
+                        "url": t.get('url') or t.get('twitterUrl', ""),
+                        "metrics": {
+                            "likes": t.get('likeCount', 0),
+                            "retweets": t.get('retweetCount', 0),
+                            "replies": t.get('replyCount', 0)
+                        }
+                    }
+                    all_tweets.append(tweet_obj)
+                    added_in_batch += 1
+
+                print(f"[API] +{added_in_batch} ajoutés (Total: {len(all_tweets)}/{limit})")
+
+                # Mise à jour Interface
+                duration = time.time() - start_time
+                yield {
+                    "current_count": len(all_tweets),
+                    "target": limit,
+                    "data": all_tweets,
+                    "duration": round(duration, 2),
+                    "finished": False
+                }
+
+                # Pagination
+                next_cursor = data.get('next_cursor')
+                if not next_cursor or not data.get('has_next_page'):
+                    print("[API] Fin de pagination (Plus de curseur).")
+                    break
+                
+                if len(all_tweets) >= limit:
+                    break
+
+                # Pause de courtoisie (4s pour éviter le bannissement temporaire)
+                time.sleep(4) 
+
+            except Exception as e:
+                yield {"error": str(e)}
+                break
 
         # Envoi Final
         duration = time.time() - start_time
         yield {
             "current_count": len(all_tweets),
-            "target": total_limit,
-            "data": all_tweets[:total_limit], # Coupe finale exacte
+            "target": limit,
+            "data": all_tweets[:limit],
             "duration": round(duration, 2),
             "finished": True
         }
