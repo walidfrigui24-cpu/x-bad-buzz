@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 from typing import Dict, Any, Generator
 
 # --- CONFIGURATION ---
-API_KEY = "new1_c4a4317b0a7f4669b7a0baf181eb4861" 
+API_KEY = "new1_e1b45ea37988449dbebfea70c1740126" 
 API_URL = "https://api.twitterapi.io/twitter/tweet/advanced_search"
 
 class TwitterAPIClient:
@@ -184,3 +184,4 @@ class TwitterAPIClient:
             "duration": round(duration, 2),
             "finished": True
         }
+
